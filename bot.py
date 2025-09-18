@@ -1,5 +1,4 @@
 import discord
-# NO LONGER NEEDED: from discord import app_commands
 import os
 import asyncio
 from dotenv import load_dotenv
@@ -16,24 +15,21 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 
-class LiveTTSBot(discord.Client):
+# --- NEW: Pycord uses Bot instead of Client for slash commands ---
+class LiveTTSBot(discord.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # --- THE FIRST FIX ---
-        # We now create the CommandTree directly from the discord object
-        self.tree = discord.app_commands.CommandTree(self)
         self.active_guilds = {}
         self.DEFAULT_SETTINGS = {"voice": "en-US-JennyNeural", "rate": "+0%", "pitch": "+0Hz"}
         self.TIMEOUT_SECONDS = 900
 
-    async def setup_hook(self) -> None:
-        await self.tree.sync()
+    # setup_hook is no longer needed for command syncing with discord.Bot
+    async def on_ready(self):
+        # Start the web server when the bot is ready
         port = int(os.environ.get("PORT", 8080))
         config = Config()
         config.bind = [f"0.0.0.0:{port}"]
         self.loop.create_task(serve(app, config))
-
-    async def on_ready(self):
         print(f'Logged in as {self.user}!')
         print('Slash commands synced. Bot is ready.')
 
@@ -104,38 +100,40 @@ async def on_message(message):
                 settings = guild_info.setdefault("settings", client.DEFAULT_SETTINGS.copy())
                 await say(vc, message.content, settings)
 
-# --- COMMANDS (UNCHANGED) ---
-@client.tree.command(name="join", description="Joins your VC and reads messages from this text channel.")
-async def join(interaction: discord.Interaction):
-    if interaction.user.voice is None: return await interaction.response.send_message("You must be in a voice channel.", ephemeral=True)
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    voice_channel = interaction.user.voice.channel
+# --- COMMANDS (NOW ATTACHED DIRECTLY TO THE CLIENT) ---
+@client.slash_command(name="join", description="Joins your VC and reads messages from this text channel.")
+async def join(ctx: discord.ApplicationContext):
+    if ctx.author.voice is None: return await ctx.respond("You must be in a voice channel.", ephemeral=True)
+    await ctx.defer(ephemeral=True)
+    voice_channel = ctx.author.voice.channel
     try:
-        if interaction.guild.voice_client: await interaction.guild.voice_client.move_to(voice_channel)
+        if ctx.voice_client: await ctx.voice_client.move_to(voice_channel)
         else: await voice_channel.connect()
-    except asyncio.TimeoutError: return await interaction.followup.send("Could not connect to the voice channel in time.", ephemeral=True)
-    except Exception as e: return await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
-    vc = interaction.guild.voice_client
-    if interaction.guild.id in client.active_guilds and 'task' in client.active_guilds[interaction.guild.id]: client.active_guilds[interaction.guild.id]['task'].cancel()
-    client.active_guilds[interaction.guild.id] = { "tc": interaction.channel, "task": asyncio.create_task(autoleave_task(interaction.guild.id)), "settings": client.active_guilds.get(interaction.guild.id, {}).get("settings", client.DEFAULT_SETTINGS.copy()) }
-    await interaction.followup.send(f"Joined **{voice_channel.name}** and will read messages from this channel.", ephemeral=False)
-    settings = client.active_guilds[interaction.guild.id]["settings"]
+    except asyncio.TimeoutError: return await ctx.followup.send("Could not connect to the voice channel in time.", ephemeral=True)
+    except Exception as e: return await ctx.followup.send(f"An error occurred: {e}", ephemeral=True)
+    vc = ctx.voice_client
+    if ctx.guild.id in client.active_guilds and 'task' in client.active_guilds[ctx.guild.id]: client.active_guilds[ctx.guild.id]['task'].cancel()
+    client.active_guilds[ctx.guild.id] = { "tc": ctx.channel, "task": asyncio.create_task(autoleave_task(ctx.guild.id)), "settings": client.active_guilds.get(ctx.guild.id, {}).get("settings", client.DEFAULT_SETTINGS.copy()) }
+    await ctx.followup.send(f"Joined **{voice_channel.name}** and will read messages from this channel.", ephemeral=False)
+    settings = client.active_guilds[ctx.guild.id]["settings"]
     await say(vc, "Connected.", settings)
-@client.tree.command(name="leave", description="Stops reading messages and leaves the voice channel.")
-async def leave(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    vc = interaction.guild.voice_client
-    if not vc: return await interaction.followup.send("I'm not in a voice channel.", ephemeral=True)
+
+@client.slash_command(name="leave", description="Stops reading messages and leaves the voice channel.")
+async def leave(ctx: discord.ApplicationContext):
+    await ctx.defer(ephemeral=True)
+    vc = ctx.voice_client
+    if not vc: return await ctx.followup.send("I'm not in a voice channel.", ephemeral=True)
     await vc.disconnect()
-    if interaction.guild.id in client.active_guilds:
-        client.active_guilds[interaction.guild.id]['task'].cancel()
-        del client.active_guilds[interaction.guild.id]
-    await interaction.followup.send("Left the voice channel.", ephemeral=True)
-@client.tree.command(name="settings", description="Opens the TTS settings panel.")
-async def settings(interaction: discord.Interaction):
-    embed = create_settings_embed(interaction.guild.id)
-    view = SettingsView(interaction.guild.id)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    if ctx.guild.id in client.active_guilds:
+        client.active_guilds[ctx.guild.id]['task'].cancel()
+        del client.active_guilds[ctx.guild.id]
+    await ctx.followup.send("Left the voice channel.", ephemeral=True)
+
+@client.slash_command(name="settings", description="Opens the TTS settings panel.")
+async def settings(ctx: discord.ApplicationContext):
+    embed = create_settings_embed(ctx.guild.id)
+    view = SettingsView(ctx.guild.id)
+    await ctx.respond(embed=embed, view=view, ephemeral=True)
 
 # --- FINAL STARTUP ---
 client.run(DISCORD_TOKEN)
