@@ -1,5 +1,5 @@
 import discord
-from discord import app_commands
+# NO LONGER NEEDED: from discord import app_commands
 import os
 import asyncio
 from dotenv import load_dotenv
@@ -19,7 +19,9 @@ intents.guilds = True
 class LiveTTSBot(discord.Client):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.tree = app_commands.CommandTree(self)
+        # --- THE FIRST FIX ---
+        # We now create the CommandTree directly from the discord object
+        self.tree = discord.app_commands.CommandTree(self)
         self.active_guilds = {}
         self.DEFAULT_SETTINGS = {"voice": "en-US-JennyNeural", "rate": "+0%", "pitch": "+0Hz"}
         self.TIMEOUT_SECONDS = 900
@@ -67,8 +69,7 @@ class SettingsView(discord.ui.View):
     async def pitch_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
         guild_data = client.active_guilds.setdefault(self.guild_id, {}); guild_data.setdefault("settings", client.DEFAULT_SETTINGS.copy())['pitch'] = select.values[0]; await self.update_message(interaction)
 
-# --- CORE LOGIC (REWRITTEN TO BE ROBUST) ---
-
+# --- CORE LOGIC (UNCHANGED) ---
 async def autoleave_task(guild_id):
     await asyncio.sleep(client.TIMEOUT_SECONDS)
     if guild_id in client.active_guilds:
@@ -78,7 +79,6 @@ async def autoleave_task(guild_id):
             await guild.voice_client.disconnect()
         if guild_id in client.active_guilds:
             del client.active_guilds[guild_id]
-
 async def say(vc, text, settings):
     if not vc or not vc.is_connected(): return
     try:
@@ -90,7 +90,6 @@ async def say(vc, text, settings):
         audio_source = discord.FFmpegPCMAudio(audio_stream, pipe=True)
         vc.play(audio_source)
     except Exception as e: print(f"Error in say function: {e}")
-
 @client.event
 async def on_message(message):
     if message.author.bot or not message.guild: return
@@ -105,61 +104,33 @@ async def on_message(message):
                 settings = guild_info.setdefault("settings", client.DEFAULT_SETTINGS.copy())
                 await say(vc, message.content, settings)
 
-# --- COMMANDS (REWRITTEN TO BE ROBUST) ---
-
+# --- COMMANDS (UNCHANGED) ---
 @client.tree.command(name="join", description="Joins your VC and reads messages from this text channel.")
 async def join(interaction: discord.Interaction):
-    if interaction.user.voice is None:
-        return await interaction.response.send_message("You must be in a voice channel.", ephemeral=True)
-    
-    # Defer the response immediately to prevent timeouts
+    if interaction.user.voice is None: return await interaction.response.send_message("You must be in a voice channel.", ephemeral=True)
     await interaction.response.defer(ephemeral=True, thinking=True)
-    
     voice_channel = interaction.user.voice.channel
     try:
-        if interaction.guild.voice_client:
-            await interaction.guild.voice_client.move_to(voice_channel)
-        else:
-            await voice_channel.connect()
-    except asyncio.TimeoutError:
-        return await interaction.followup.send("Could not connect to the voice channel in time.", ephemeral=True)
-    except Exception as e:
-        return await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
-
-    # This code only runs AFTER a successful connection
+        if interaction.guild.voice_client: await interaction.guild.voice_client.move_to(voice_channel)
+        else: await voice_channel.connect()
+    except asyncio.TimeoutError: return await interaction.followup.send("Could not connect to the voice channel in time.", ephemeral=True)
+    except Exception as e: return await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
     vc = interaction.guild.voice_client
-    
-    if interaction.guild.id in client.active_guilds and 'task' in client.active_guilds[interaction.guild.id]:
-        client.active_guilds[interaction.guild.id]['task'].cancel()
-
-    # Set the state correctly
-    client.active_guilds[interaction.guild.id] = {
-        "tc": interaction.channel,
-        "task": asyncio.create_task(autoleave_task(interaction.guild.id)),
-        "settings": client.active_guilds.get(interaction.guild.id, {}).get("settings", client.DEFAULT_SETTINGS.copy())
-    }
-
-    # Use followup.send because we deferred earlier
+    if interaction.guild.id in client.active_guilds and 'task' in client.active_guilds[interaction.guild.id]: client.active_guilds[interaction.guild.id]['task'].cancel()
+    client.active_guilds[interaction.guild.id] = { "tc": interaction.channel, "task": asyncio.create_task(autoleave_task(interaction.guild.id)), "settings": client.active_guilds.get(interaction.guild.id, {}).get("settings", client.DEFAULT_SETTINGS.copy()) }
     await interaction.followup.send(f"Joined **{voice_channel.name}** and will read messages from this channel.", ephemeral=False)
-    
     settings = client.active_guilds[interaction.guild.id]["settings"]
     await say(vc, "Connected.", settings)
-
 @client.tree.command(name="leave", description="Stops reading messages and leaves the voice channel.")
 async def leave(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     vc = interaction.guild.voice_client
-    if not vc:
-        return await interaction.followup.send("I'm not in a voice channel.", ephemeral=True)
-    
+    if not vc: return await interaction.followup.send("I'm not in a voice channel.", ephemeral=True)
     await vc.disconnect()
-    
     if interaction.guild.id in client.active_guilds:
         client.active_guilds[interaction.guild.id]['task'].cancel()
         del client.active_guilds[interaction.guild.id]
-        
     await interaction.followup.send("Left the voice channel.", ephemeral=True)
-
 @client.tree.command(name="settings", description="Opens the TTS settings panel.")
 async def settings(interaction: discord.Interaction):
     embed = create_settings_embed(interaction.guild.id)
