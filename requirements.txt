@@ -1,4 +1,4 @@
-discord.py[voice]==2.3.2
+py-cord[voice]
 python-dotenv==1.0.0
 edge-tts==6.1.9
 quart==0.19.4
