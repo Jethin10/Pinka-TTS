@@ -3,3 +3,4 @@ python-dotenv==1.0.0
 edge-tts==6.1.9
 quart==0.19.4
 hypercorn==0.16.0
+Flask==3.0.3
