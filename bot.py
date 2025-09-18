@@ -107,7 +107,9 @@ app = Flask('')
 def home():
     return "TTS Bot is alive!"
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    # This line tells the server to use Render's port, or 8080 if running locally.
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
 def keep_alive():
     t = Thread(target=run)
     t.start()
@@ -222,4 +224,5 @@ async def on_ready():
     print('Slash commands synced. Bot is ready.')
 
 keep_alive()
+
 client.run(DISCORD_TOKEN)
