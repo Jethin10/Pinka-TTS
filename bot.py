@@ -19,7 +19,9 @@ intents.guilds = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-bot_data = {}
+# We only store the text channel and the timeout task now.
+# The voice client (vc) will be fetched directly from discord.py when needed.
+active_guilds = {}
 DEFAULT_SETTINGS = {
     "voice": "en-US-JennyNeural",
     "rate": "+0%",
@@ -33,10 +35,10 @@ app = Quart('')
 async def home():
     return "TTS Bot is alive!"
 
-# --- 3. BOT FEATURES ---
+# --- 3. BOT FEATURES (SETTINGS PART IS UNCHANGED) ---
 
 def create_settings_embed(guild_id):
-    settings = bot_data.setdefault(guild_id, {}).setdefault("settings", DEFAULT_SETTINGS.copy())
+    settings = active_guilds.setdefault(guild_id, {}).setdefault("settings", DEFAULT_SETTINGS.copy())
     embed = discord.Embed(
         title="TTS Bot Settings",
         description="Adjust the voice, speed, and clarity for live reading.",
@@ -48,60 +50,52 @@ def create_settings_embed(guild_id):
     return embed
 
 class SettingsView(discord.ui.View):
+    # This class is unchanged
     def __init__(self, guild_id):
         super().__init__(timeout=180)
         self.guild_id = guild_id
-
     async def update_message(self, interaction: discord.Interaction):
         embed = create_settings_embed(self.guild_id)
         await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.select(
-        placeholder="Choose a voice/accent...",
-        options=[
-            discord.SelectOption(label="Jenny (US Female)", value="en-US-JennyNeural"),
-            discord.SelectOption(label="Guy (US Male)", value="en-US-GuyNeural"),
-            discord.SelectOption(label="Libby (UK Female)", value="en-GB-LibbyNeural"),
-            discord.SelectOption(label="Ryan (UK Male)", value="en-GB-RyanNeural"),
-            discord.SelectOption(label="Natasha (AU Female)", value="en-AU-NatashaNeural"),
-        ]
-    )
+    @discord.ui.select( placeholder="Choose a voice/accent...", options=[ discord.SelectOption(label="Jenny (US Female)", value="en-US-JennyNeural"), discord.SelectOption(label="Guy (US Male)", value="en-US-GuyNeural"), discord.SelectOption(label="Libby (UK Female)", value="en-GB-LibbyNeural"), discord.SelectOption(label="Ryan (UK Male)", value="en-GB-RyanNeural"), discord.SelectOption(label="Natasha (AU Female)", value="en-AU-NatashaNeural"), ] )
     async def voice_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
-        guild_data = bot_data.setdefault(self.guild_id, {})
-        guild_data.setdefault("settings", DEFAULT_SETTINGS.copy())['voice'] = select.values[0]
-        await self.update_message(interaction)
-
+        guild_data = active_guilds.setdefault(self.guild_id, {}); guild_data.setdefault("settings", DEFAULT_SETTINGS.copy())['voice'] = select.values[0]; await self.update_message(interaction)
     @discord.ui.select( placeholder="Choose the speech speed...", options=[ discord.SelectOption(label="Slower", value="-25%"), discord.SelectOption(label="Normal", value="+0%"), discord.SelectOption(label="Faster", value="+25%"), ] )
     async def rate_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
-        guild_data = bot_data.setdefault(self.guild_id, {})
-        guild_data.setdefault("settings", DEFAULT_SETTINGS.copy())['rate'] = select.values[0]
-        await self.update_message(interaction)
-
+        guild_data = active_guilds.setdefault(self.guild_id, {}); guild_data.setdefault("settings", DEFAULT_SETTINGS.copy())['rate'] = select.values[0]; await self.update_message(interaction)
     @discord.ui.select( placeholder="Choose the voice clarity/pitch...", options=[ discord.SelectOption(label="Lower", value="-20Hz"), discord.SelectOption(label="Normal", value="+0Hz"), discord.SelectOption(label="Higher", value="+20Hz"), ] )
     async def pitch_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
-        guild_data = bot_data.setdefault(self.guild_id, {})
-        guild_data.setdefault("settings", DEFAULT_SETTINGS.copy())['pitch'] = select.values[0]
-        await self.update_message(interaction)
+        guild_data = active_guilds.setdefault(self.guild_id, {}); guild_data.setdefault("settings", DEFAULT_SETTINGS.copy())['pitch'] = select.values[0]; await self.update_message(interaction)
+
+# --- 4. CORE BOT LOGIC (REWRITTEN FOR RELIABILITY) ---
 
 async def autoleave_task(guild_id):
+    """Waits for inactivity and then leaves."""
     await asyncio.sleep(TIMEOUT_SECONDS)
-    if guild_id in bot_data and "vc" in bot_data[guild_id]:
-        guild_data = bot_data[guild_id]
-        await guild_data["tc"].send(f"No activity for {int(TIMEOUT_SECONDS/60)} minutes, leaving.")
-        await guild_data["vc"].disconnect()
-        del bot_data[guild_id]["vc"]
-        del bot_data[guild_id]["tc"]
-        del bot_data[guild_id]["task"]
+    
+    # Check if the bot is still supposed to be active in this guild
+    if guild_id in active_guilds:
+        guild = client.get_guild(guild_id)
+        if guild and guild.voice_client:
+            await active_guilds[guild_id]["tc"].send(f"No activity for {int(TIMEOUT_SECONDS/60)} minutes, leaving.")
+            await guild.voice_client.disconnect()
+        # Clean up our state regardless
+        del active_guilds[guild_id]
 
 async def say(vc, text, settings):
+    """Generates and plays audio. This function is now more robust."""
+    if not vc or not vc.is_connected():
+        print("Say command called but not connected to a voice channel.")
+        return
+        
     try:
-        # THIS IS THE PART THAT WAS BROKEN AND IS NOW FIXED
         communicate = edge_tts.Communicate(text, settings["voice"], rate=settings["rate"], pitch=settings["pitch"])
         audio_stream = b''
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 audio_stream += chunk["data"]
         
+        # This loop prevents messages from cutting each other off
         while vc.is_playing():
             await asyncio.sleep(0.1)
             
@@ -112,17 +106,25 @@ async def say(vc, text, settings):
 
 @client.event
 async def on_message(message):
+    """Listens for messages and reads them aloud."""
     if message.author.bot or not message.guild:
         return
+
     guild_id = message.guild.id
-    if guild_id in bot_data and "vc" in bot_data[guild_id]:
-        guild_data = bot_data[guild_id]
-        if message.channel.id == guild_data["tc"].id:
-            guild_data["task"].cancel()
-            guild_data["task"] = asyncio.create_task(autoleave_task(guild_id))
-            vc = guild_data["vc"]
-            settings = guild_data.setdefault("settings", DEFAULT_SETTINGS.copy())
-            if vc.is_connected():
+    # Check if this guild is marked as active in our state
+    if guild_id in active_guilds:
+        guild_info = active_guilds[guild_id]
+        
+        # Check if the message is in the correct text channel
+        if message.channel.id == guild_info["tc"].id:
+            # Get the current, live voice client from the guild
+            vc = message.guild.voice_client
+            if vc:
+                # Cancel and restart the autoleave timer
+                guild_info["task"].cancel()
+                guild_info["task"] = asyncio.create_task(autoleave_task(guild_id))
+                
+                settings = guild_info.setdefault("settings", DEFAULT_SETTINGS.copy())
                 await say(vc, message.content, settings)
 
 @tree.command(name="join", description="Joins your VC and reads messages from this text channel.")
@@ -131,37 +133,46 @@ async def join(interaction: discord.Interaction):
         return await interaction.response.send_message("You must be in a voice channel.", ephemeral=True)
     
     voice_channel = interaction.user.voice.channel
-    text_channel = interaction.channel
     
+    # If already in a voice channel in this guild, move to the new one
     if interaction.guild.voice_client:
-        await interaction.guild.voice_client.disconnect()
-        
-    try:
-        vc = await voice_channel.connect()
-    except Exception as e:
-        return await interaction.response.send_message(f"Failed to connect: {e}", ephemeral=True)
+        await interaction.guild.voice_client.move_to(voice_channel)
+    else:
+        await voice_channel.connect()
+
+    # Get the freshly connected voice client (the source of truth)
+    vc = interaction.guild.voice_client
     
-    guild_data = bot_data.setdefault(interaction.guild.id, {})
-    guild_data["task"] = asyncio.create_task(autoleave_task(interaction.guild.id))
-    guild_data["vc"] = vc
-    guild_data["tc"] = text_channel
+    # Store our state, but WITHOUT the vc object
+    if interaction.guild.id in active_guilds:
+        active_guilds[interaction.guild.id]['task'].cancel() # Cancel old task if exists
+    
+    active_guilds[interaction.guild.id] = {
+        "tc": interaction.channel,
+        "task": asyncio.create_task(autoleave_task(interaction.guild.id)),
+        "settings": active_guilds.get(interaction.guild.id, {}).get("settings", DEFAULT_SETTINGS.copy())
+    }
     
     await interaction.response.send_message(f"Joined **{voice_channel.name}** and will read messages from this channel.")
-    settings = guild_data.setdefault("settings", DEFAULT_SETTINGS.copy())
+    
+    settings = active_guilds[interaction.guild.id]["settings"]
     await say(vc, "Connected.", settings)
 
 @tree.command(name="leave", description="Stops reading messages and leaves the voice channel.")
 async def leave(interaction: discord.Interaction):
-    if interaction.guild.id not in bot_data or "vc" not in bot_data[interaction.guild.id]:
+    # Get the current voice client directly from the guild
+    vc = interaction.guild.voice_client
+    
+    if not vc:
         return await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
     
-    guild_data = bot_data[interaction.guild.id]
-    guild_data["task"].cancel()
-    await guild_data["vc"].disconnect()
+    # Disconnect the voice client
+    await vc.disconnect()
     
-    del bot_data[interaction.guild.id]["vc"]
-    del bot_data[interaction.guild.id]["tc"]
-    del bot_data[interaction.guild.id]["task"]
+    # Clean up our own state dictionary
+    if interaction.guild.id in active_guilds:
+        active_guilds[interaction.guild.id]['task'].cancel()
+        del active_guilds[interaction.guild.id]
     
     await interaction.response.send_message("Left the voice channel.")
 
@@ -177,7 +188,7 @@ async def on_ready():
     print(f'Logged in as {client.user}!')
     print('Slash commands synced. Bot is ready.')
 
-# --- 4. THE UNIFIED STARTUP PROCESS ---
+# --- 5. THE UNIFIED STARTUP PROCESS ---
 port = int(os.environ.get("PORT", 8080))
 config = Config()
 config.bind = [f"0.0.0.0:{port}"]
