@@ -76,16 +76,40 @@ async def autoleave_task(guild_id):
         if guild_id in client.active_guilds:
             del client.active_guilds[guild_id]
 async def say(vc, text, settings):
-    if not vc or not vc.is_connected(): return
+    # --- DEBUGGING BREADCRUMBS ---
+    print("--- 1. SAY FUNCTION CALLED ---")
+    if not vc or not vc.is_connected():
+        print("--- X. ERROR: VC not connected at start of say() ---")
+        return
     try:
+        print(f"--- 2. Generating audio for: '{text}' with voice '{settings['voice']}' ---")
         communicate = edge_tts.Communicate(text, settings["voice"], rate=settings["rate"], pitch=settings["pitch"])
         audio_stream = b''
         async for chunk in communicate.stream():
-            if chunk["type"] == "audio": audio_stream += chunk["data"]
-        while vc.is_playing(): await asyncio.sleep(0.1)
+            if chunk["type"] == "audio":
+                audio_stream += chunk["data"]
+        
+        print(f"--- 3. Audio generated. Size: {len(audio_stream)} bytes. ---")
+
+        if len(audio_stream) == 0:
+            print("--- X. ERROR: Audio stream is empty! ---")
+            return
+
+        # Wait for any previous audio to finish
+        while vc.is_playing():
+            print("--- Waiting for previous audio to finish... ---")
+            await asyncio.sleep(0.1)
+        
+        print("--- 4. Attempting to play audio via vc.play() ---")
         audio_source = discord.FFmpegPCMAudio(audio_stream, pipe=True)
         vc.play(audio_source)
-    except Exception as e: print(f"Error in say function: {e}")
+        print("--- 5. Audio playback successfully started. ---")
+
+    except Exception as e:
+        print(f"--- !!! AN ERROR OCCURRED IN SAY FUNCTION !!! ---")
+        print(f"--- Error Details: {e} ---")
+        import traceback
+        traceback.print_exc()
 @client.event
 async def on_message(message):
     if message.author.bot or not message.guild: return
@@ -137,3 +161,4 @@ async def settings(ctx: discord.ApplicationContext):
 
 # --- FINAL STARTUP ---
 client.run(DISCORD_TOKEN)
+
